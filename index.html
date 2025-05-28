@@ -1,0 +1,396 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3x3滑動拼圖遊戲</title>
+    <style>
+        body {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f0f0f0;
+            font-family: Arial, sans-serif;
+        }
+        canvas {
+            border: 2px solid #333;
+            background-color: white;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+        }
+        button {
+            margin-top: 20px;
+            padding: 10px 20px;
+            font-size: 16px;
+            background-color: #1e90ff;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #156bb7;
+        }
+        button:disabled {
+            background-color: #a0a0a0;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="puzzleCanvas" width="600" height="600"></canvas>
+    <button id="solveButton">使用A*演算法求解</button>
+    <script>
+        const canvas = document.getElementById('puzzleCanvas');
+        const ctx = canvas.getContext('2d');
+        const solveButton = document.getElementById('solveButton');
+
+        // 假設圖像（這裡使用簡單的base64圖像，實際應用可替換）
+        const img = new Image();
+        img.src = 'LINE_ALBUM_517.jpg';
+        const gridSize = 3; // 3x3拼圖
+        const pieceSize = 200; // 每個拼圖塊200x200像素
+        let board = []; // 當前拼圖狀態
+        let emptyPos = { row: 2, col: 2 }; // 空位位置
+        let isPuzzleComplete = false;
+        let animationFrame = 0;
+        let isSolving = false;
+
+        // 拼圖零件類
+        class PuzzlePiece {
+            constructor(row, col, img) {
+                this.row = row;
+                this.col = col;
+                this.correctRow = row;
+                this.correctCol = col;
+                this.img = img;
+            }
+
+            draw() {
+                if (this.row === emptyPos.row && this.col === emptyPos.col) return; // 空位不繪製
+                const x = this.col * pieceSize;
+                const y = this.row * pieceSize;
+                ctx.save();
+                ctx.beginPath();
+                ctx.rect(x, y, pieceSize, pieceSize);
+                ctx.closePath();
+                ctx.clip();
+                ctx.drawImage(this.img, this.correctCol * pieceSize, this.correctRow * pieceSize, pieceSize, pieceSize, x, y, pieceSize, pieceSize);
+                ctx.restore();
+                ctx.shadowColor = 'rgba(0, 0, 0, 0.3)';
+                ctx.shadowBlur = 5;
+                ctx.shadowOffsetX = 2;
+                ctx.shadowOffsetY = 2;
+                ctx.strokeStyle = '#1e90ff';
+                ctx.lineWidth = 3;
+                ctx.strokeRect(x, y, pieceSize, pieceSize);
+                ctx.shadowBlur = 0;
+                ctx.shadowOffsetX = 0;
+                ctx.shadowOffsetY = 0;
+            }
+        }
+
+        // 初始化拼圖
+        function initPuzzle() {
+            board = [];
+            for (let row = 0; row < gridSize; row++) {
+                board[row] = [];
+                for (let col = 0; col < gridSize; col++) {
+                    if (row === gridSize - 1 && col === gridSize - 1) continue; // 最後一格為空
+                    board[row][col] = new PuzzlePiece(row, col, img);
+                }
+            }
+            // 隨機打亂（確保可解）
+            shufflePuzzle();
+        }
+
+        // 隨機打亂拼圖
+        function shufflePuzzle() {
+            const moves = [[0, 1], [1, 0], [0, -1], [-1, 0]];
+            let shuffleCount = 100;
+            let currentEmpty = { row: 2, col: 2 };
+            while (shuffleCount--) {
+                const validMoves = moves.filter(([dr, dc]) => {
+                    const newRow = currentEmpty.row + dr;
+                    const newCol = currentEmpty.col + dc;
+                    return newRow >= 0 && newRow < gridSize && newCol >= 0 && newCol < gridSize;
+                });
+                const [dr, dc] = validMoves[Math.floor(Math.random() * validMoves.length)];
+                const newRow = currentEmpty.row + dr;
+                const newCol = currentEmpty.col + dc;
+                if (board[newRow] && board[newRow][newCol]) {
+                    board[newRow][newCol].row = currentEmpty.row;
+                    board[newRow][newCol].col = currentEmpty.col;
+                    board[currentEmpty.row][currentEmpty.col] = board[newRow][newCol];
+                    board[newRow][newCol] = null;
+                    currentEmpty.row = newRow;
+                    currentEmpty.col = newCol;
+                }
+            }
+            emptyPos = currentEmpty;
+            // 確保拼圖未完成
+            isPuzzleComplete = false;
+        }
+
+        // 檢查拼圖是否完成
+        function checkPuzzleComplete() {
+            for (let row = 0; row < gridSize; row++) {
+                for (let col = 0; col < gridSize; col++) {
+                    if (row === gridSize - 1 && col === gridSize - 1) continue;
+                    if (!board[row][col] || board[row][col].row !== board[row][col].correctRow || board[row][col].col !== board[row][col].correctCol) {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+
+        // 繪製拼圖
+        function drawPuzzle() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            if (isPuzzleComplete) {
+                animationFrame++;
+                const scale = 1 + 0.1 * Math.sin(animationFrame * 0.05);
+                const angle = animationFrame * 0.02;
+                ctx.save();
+                ctx.translate(canvas.width / 2, canvas.height / 2);
+                ctx.scale(scale, scale);
+                ctx.rotate(angle);
+                ctx.translate(-canvas.width / 2, -canvas.width / 2);
+                ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                ctx.font = '30px Arial';
+                ctx.fillStyle = 'red';
+                ctx.textAlign = 'center';
+                ctx.fillText('拼圖完成！', canvas.width / 2, canvas.height / 2);
+                ctx.restore();
+
+                if (animationFrame > 300) {
+                    isPuzzleComplete = false;
+                    animationFrame = 0;
+                    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                } else {
+                    requestAnimationFrame(drawPuzzle);
+                }
+            } else {
+                for (let row = 0; row < gridSize; row++) {
+                    for (let col = 0; col < gridSize; col++) {
+                        if (board[row][col]) board[row][col].draw();
+                    }
+                }
+            }
+        }
+
+        // 滑動拼圖塊
+        function slidePiece(row, col) {
+            if (isSolving || isPuzzleComplete) return;
+            const moves = [[0, 1], [1, 0], [0, -1], [-1, 0]];
+            for (const [dr, dc] of moves) {
+                const newRow = row + dr;
+                const newCol = col + dc;
+                if (newRow === emptyPos.row && newCol === emptyPos.col) {
+                    board[row][col].row = emptyPos.row;
+                    board[row][col].col = emptyPos.col;
+                    board[emptyPos.row][emptyPos.col] = board[row][col];
+                    board[row][col] = null;
+                    emptyPos.row = row;
+                    emptyPos.col = col;
+                    drawPuzzle();
+                    if (checkPuzzleComplete()) {
+                        isPuzzleComplete = true;
+                        animationFrame = 0;
+                        requestAnimationFrame(drawPuzzle);
+                    }
+                    break;
+                }
+            }
+        }
+
+        // A*演算法求解
+        function solvePuzzle() {
+            if (isSolving || isPuzzleComplete) return;
+            isSolving = true;
+            solveButton.disabled = true;
+
+            // 節點類
+            class Node {
+                constructor(board, emptyPos, g = 0, parent = null, move = null) {
+                    this.board = board.map(row => [...row]);
+                    this.emptyPos = { ...emptyPos };
+                    this.g = g;
+                    this.h = this.calculateHeuristic(); // 修正：使用 this.calculateHeuristic
+                    this.f = this.g + this.h;
+                    this.parent = parent;
+                    this.move = move;
+                }
+
+                calculateHeuristic() {
+                    let h = 0;
+                    for (let row = 0; row < gridSize; row++) {
+                        for (let col = 0; col < gridSize; col++) {
+                            if (row === gridSize - 1 && col === gridSize - 1) continue;
+                            if (this.board[row][col]) {
+                                const correctRow = this.board[row][col].correctRow;
+                                const correctCol = this.board[row][col].correctCol;
+                                h += Math.abs(row - correctRow) + Math.abs(col - correctCol);
+                            }
+                        }
+                    }
+                    return h;
+                }
+            }
+
+            // 優先隊列
+            class PriorityQueue {
+                constructor() {
+                    this.items = [];
+                }
+
+                enqueue(node) {
+                    this.items.push(node);
+                    this.items.sort((a, b) => a.f - b.f);
+                }
+
+                dequeue() {
+                    return this.items.shift();
+                }
+
+                isEmpty() {
+                    return this.items.length === 0;
+                }
+            }
+
+            // A*演算法
+            const openList = new PriorityQueue();
+            const closedSet = new Set();
+            const startNode = new Node(board, emptyPos);
+            openList.enqueue(startNode);
+            const moves = [[0, 1], [1, 0], [0, -1], [-1, 0]];
+
+            async function aStar() {
+                while (!openList.isEmpty()) {
+                    const current = openList.dequeue();
+                    const stateKey = JSON.stringify(current.board.map(row => row.map(piece => piece ? [piece.correctRow, piece.correctCol] : null)));
+                    if (closedSet.has(stateKey)) continue;
+                    closedSet.add(stateKey);
+
+                    if (current.h === 0) {
+                        // 找到解，重建路徑
+                        const path = [];
+                        let node = current;
+                        while (node.parent) {
+                            path.unshift(node.move);
+                            node = node.parent;
+                        }
+                        // 逐步顯示移動
+                        for (const [row, col] of path) {
+                            if (board[row][col]) {
+                                board[row][col].row = emptyPos.row;
+                                board[row][col].col = emptyPos.col;
+                                board[emptyPos.row][emptyPos.col] = board[row][col];
+                                board[row][col] = null;
+                                emptyPos.row = row;
+                                emptyPos.col = col;
+                                drawPuzzle();
+                                await new Promise(resolve => setTimeout(resolve, 500));
+                            }
+                        }
+                        isPuzzleComplete = true;
+                        animationFrame = 0;
+                        requestAnimationFrame(drawPuzzle);
+                        isSolving = false;
+                        solveButton.disabled = false;
+                        return;
+                    }
+
+                    for (const [dr, dc] of moves) {
+                        const newRow = current.emptyPos.row + dr;
+                        const newCol = current.emptyPos.col + dc;
+                        if (newRow >= 0 && newRow < gridSize && newCol >= 0 && newCol < gridSize) {
+                            const newBoard = current.board.map(row => row.map(piece => piece ? { ...piece } : null));
+                            newBoard[current.emptyPos.row][current.emptyPos.col] = newBoard[newRow][newCol];
+                            newBoard[newRow][newCol] = null;
+                            if (newBoard[current.emptyPos.row][current.emptyPos.col]) {
+                                newBoard[current.emptyPos.row][current.emptyPos.col].row = current.emptyPos.row;
+                                newBoard[current.emptyPos.row][current.emptyPos.col].col = current.emptyPos.col;
+                            }
+                            const newNode = new Node(newBoard, { row: newRow, col: newCol }, current.g + 1, current, [newRow, newCol]);
+                            const newStateKey = JSON.stringify(newBoard.map(row => row.map(piece => piece ? [piece.correctRow, piece.correctCol] : null)));
+                            if (!closedSet.has(newStateKey)) {
+                                openList.enqueue(newNode);
+                            }
+                        }
+                    }
+                }
+                isSolving = false;
+                solveButton.disabled = false;
+                alert('無法找到解！請重試。');
+            }
+
+            aStar();
+        }
+
+        // 事件處理
+        canvas.addEventListener('mousedown', (e) => {
+            if (isSolving || isPuzzleComplete) return;
+            const rect = canvas.getBoundingClientRect();
+            const mx = e.clientX - rect.left;
+            const my = e.clientY - rect.top;
+            const row = Math.floor(my / pieceSize);
+            const col = Math.floor(mx / pieceSize);
+            if (row >= 0 && row < gridSize && col >= 0 && col < gridSize && board[row][col]) {
+                slidePiece(row, col);
+            }
+        });
+
+        solveButton.addEventListener('click', solvePuzzle);
+
+        // 圖像加載後初始化
+        img.onload = () => {
+            initPuzzle();
+            drawPuzzle();
+        };
+    </script>
+</body>
+</html>
